@@ -68,6 +68,11 @@ button{font:inherit}
 .lk .u{display:block;direction:ltr;text-align:left;color:var(--pr);font-size:.76rem;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:none}
 .lk .act{display:flex;gap:6px}
 .fl{transform:scaleX(-1)}
+.chip{display:block;padding:10px 12px;border-radius:12px;background:rgba(19,161,90,.12);color:var(--ok);font-size:.86rem;margin:0 0 12px;direction:rtl}
+.chip.warn{background:rgba(224,54,75,.1);color:var(--er)}
+.spin{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.tile.ok{background:rgba(19,161,90,.14);color:var(--ok)}.tile.er{background:rgba(224,54,75,.12);color:var(--er)}
+.sm{padding:8px 12px;font-size:.85rem;margin:6px 0 0}
 </style>
 </head>
 <body>
@@ -113,8 +118,9 @@ button{font:inherit}
 <section class="card hid" id="s4">
   <h2>ملف المشروع</h2>
   <label class="drop" id="drop"><input type="file" id="zip" accept=".zip,application/zip" class="hid"><div class="tile"><svg class="ic "><use href="#i-zip"/></svg></div><span id="zname">اضغط لاختيار ملف ZIP</span></label>
+  <div class="chip hid" id="det"></div>
   <label class="opt"><input type="checkbox" id="replace"><span>حذف الملفات القديمة واستبدالها بالكامل</span></label>
-  <label class="opt"><input type="checkbox" id="pages" checked><span>تفعيل رابط التطبيق (GitHub Pages)</span></label>
+  <label class="opt" id="pagesRow"><input type="checkbox" id="pages" checked><span>تفعيل رابط التطبيق (GitHub Pages)</span></label>
   <label class="opt"><input type="checkbox" id="autoapk" checked><span>بناء APK تلقائياً حسب نوع المشروع</span></label>
   <input id="msg" placeholder="رسالة التحديث (اختياري)">
   <div class="row"><button class="btn sec" onclick="go(3)"><svg class="ic "><use href="#i-arrow"/></svg><span>رجوع</span></button><button class="btn" id="upBtn" onclick="upload()"><svg class="ic "><use href="#i-upload"/></svg><span>رفع</span></button></div>
@@ -125,6 +131,7 @@ button{font:inherit}
 
 <section class="card hid" id="s5">
   <div class="done"><div class="tile"><svg class="ic "><use href="#i-check"/></svg></div><div><h2>تم الرفع بنجاح</h2><p class="sub" id="note"></p></div></div>
+  <div class="lk hid" id="build"><div class="tile" id="bt"></div><div class="tx"><b id="bs"></b><small id="bd"></small><button class="btn sec sm hid" id="bgo">تشغيل البناء يدوياً</button></div><div class="act"><a class="ib hid" id="blink" target="_blank" rel="noopener" aria-label="السجل"><svg class="ic"><use href="#i-ext"/></svg></a></div></div>
   <div id="links"></div>
   <button class="btn sec" onclick="go(2)"><svg class="ic "><use href="#i-upload"/></svg><span>رفع مشروع آخر</span></button>
 </section>
@@ -194,42 +201,110 @@ const prog=p=>{$('bi').style.width=p+'%'};
 
 const dirOf=p=>p.includes('/')?p.slice(0,p.lastIndexOf('/')):'.';
 const shortest=a=>a.sort((x,y)=>x.split('/').length-y.split('/').length)[0];
-function detect(paths){
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const b64u=s=>btoa(unescape(encodeURIComponent(s)));
+
+// ===== تنظيف الملفات (مخلفات Android Studio) =====
+function cleanNames(z){
+  let names=Object.keys(z.files).filter(n=>!z.files[n].dir&&!/(^|\/)(__MACOSX|\.DS_Store)(\/|$)/.test(n)&&!/(^|\/)\.git\//.test(n));
+  const mods=[...new Set(names.filter(n=>/(^|\/)build\.gradle(\.kts)?$/.test(n)).map(n=>n.includes('/')?n.slice(0,n.lastIndexOf('/')+1):''))];
+  return names.filter(n=>!/(^|\/)(\.gradle|\.idea|\.cxx|\.kotlin)\//.test(n)&&!/(^|\/)local\.properties$/.test(n)&&!mods.some(m=>n.startsWith(m+'build/')));
+}
+function stripOf(names){
+  const roots=new Set(names.map(n=>n.split('/')[0]));
+  return(roots.size===1&&names.every(n=>n.includes('/')))?[...roots][0]+'/':'';
+}
+
+// ===== اكتشاف نوع المشروع =====
+function detect(paths,noAndroid){
   const f=re=>shortest(paths.filter(p=>re.test(p)));let p;
   if(p=f(/(^|\/)pubspec\.yaml$/))return{t:'flutter',dir:dirOf(p),label:'Flutter'};
   if(p=f(/(^|\/)capacitor\.config\.(json|ts|js)$/))return{t:'cap',dir:dirOf(p),label:'Capacitor'};
-  if(p=f(/(^|\/)settings\.gradle(\.kts)?$/))return{t:'android',dir:dirOf(p),label:'Android (Gradle)'};
+  if(!noAndroid&&(p=f(/(^|\/)settings\.gradle(\.kts)?$/)))return{t:'android',dir:dirOf(p),label:'Android (Gradle)'};
   if(p=f(/(^|\/)index\.html$/))return{t:'web',dir:dirOf(p),label:'ويب (HTML)'};
   return null;
 }
+const GRADLE_FOR_AGP={'7.0':'7.0.2','7.1':'7.2','7.2':'7.3.3','7.3':'7.4','7.4':'7.5','8.0':'8.0','8.1':'8.0','8.2':'8.2','8.3':'8.4','8.4':'8.6','8.5':'8.7','8.6':'8.7','8.7':'8.9','8.8':'8.10.2','8.9':'8.11.1','8.10':'8.11.1','8.11':'8.13','8.12':'8.13','8.13':'8.13'};
+function gradleFor(agp,wrapperVer){
+  if(wrapperVer)return wrapperVer;
+  if(!agp)return 'current';
+  const [a,b]=agp.split('.');
+  return GRADLE_FOR_AGP[a+'.'+b]||'current';
+}
+async function androidInfo(z,names,strip,d){
+  const P=n=>strip?n.slice(strip.length):n;
+  const paths=names.map(P);
+  const pre=d.dir==='.'?'':d.dir+'/';
+  const read=async p=>{const n=names[paths.indexOf(p)];return n?await z.files[n].async('string'):''};
+  const gf=paths.filter(p=>p.startsWith(pre)&&/(^|\/)(build\.gradle(\.kts)?|libs\.versions\.toml)$/.test(p)).slice(0,15);
+  let txt='';for(const p of gf)txt+=await read(p)+'\n';
+  if(!/com\.android\.application|android\.application/.test(txt))return null;
+  const kotlin=/kotlin/i.test(txt);
+  const compose=/compose\s*=\s*true|plugin\.compose|androidx\.compose/.test(txt);
+  let agp=(txt.match(/^\s*(?:agp|androidGradlePlugin|android-gradle-plugin)\s*=\s*"(\d+\.\d+(?:\.\d+)?)/m)||[])[1]
+        ||(txt.match(/com\.android\.(?:application|tools\.build:gradle)[^\n]*?["':](\d+\.\d+(?:\.\d+)?)/)||[])[1];
+  const wp=await read(pre+'gradle/wrapper/gradle-wrapper.properties');
+  const gradleVer=(wp.match(/gradle-(\d+(?:\.\d+)+)-(?:bin|all)/)||[])[1];
+  const tc=txt.match(/jvmToolchain\(\s*(\d+)|JavaLanguageVersion\.of\(\s*(\d+)/);
+  const jdk=Math.max(17,tc?+(tc[1]||tc[2]):17);
+  return{...d,pre,kotlin,compose,agp,gradleVer,jdk,androidx:/androidx/.test(txt),
+    hasGradlew:paths.includes(pre+'gradlew'),hasJar:paths.includes(pre+'gradle/wrapper/gradle-wrapper.jar'),
+    label:'Android'+(kotlin?' • Kotlin':'')+(compose?' • Jetpack Compose':'')};
+}
+async function analyze(z,names,strip){
+  const paths=names.map(n=>strip?n.slice(strip.length):n);
+  let d=detect(paths);
+  if(d&&d.t==='android'){
+    const a=await androidInfo(z,names,strip,d);
+    d=a||detect(paths,true);
+  }
+  return d;
+}
+
+// ===== ملف بناء GitHub Actions =====
 function workflow(d){
   const D=d.dir;
-  const J17=`      - uses: actions/setup-java@v4
+  const J=v=>`      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: ${v}
 `;
   const NODE=`      - uses: actions/setup-node@v4
         with:
           node-version: 20
 `;
   let steps='';
-  if(d.t==='android')steps=J17+`      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Accept licenses
-        run: yes | sdkmanager --licenses >/dev/null || true
+  let collect=`      - name: Collect APK
+        run: |
+          APK=$(find . /tmp/cap -path "*outputs*" -name "*.apk" 2>/dev/null | head -1)
+          echo "APK=$APK"
+          test -n "$APK"
+          cp "$APK" "$GITHUB_WORKSPACE/app.apk"
+`;
+  if(d.t==='android'){
+    const wrap=d.hasGradlew&&d.hasJar;
+    steps=J(d.jdk||17)+`      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
-      - name: Build
+`+(wrap?'':`        with:
+          gradle-version: ${gradleFor(d.agp,d.gradleVer)}
+`)+`      - name: Build debug APK
         run: |
           cd "${D}"
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          if [ -f gradlew ]; then chmod +x gradlew; ./gradlew assembleDebug --no-daemon --stacktrace; else gradle assembleDebug --no-daemon --stacktrace; fi
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then chmod +x gradlew; GR=./gradlew; else GR=gradle; fi
+          $GR assembleDebug --no-daemon --stacktrace
 `;
-  else if(d.t==='flutter')steps=J17+`      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Accept licenses
-        run: yes | sdkmanager --licenses >/dev/null || true
-      - uses: subosito/flutter-action@v2
+    collect=`      - name: Collect APK
+        run: |
+          mkdir -p apks
+          find . -path "*/build/outputs/apk/*" -name "*.apk" -not -path "./apks/*" -exec cp --backup=numbered {} apks/ \\;
+          ls -la apks
+          APK=$(ls -S apks/*.apk | head -1)
+          echo "APK=$APK"
+          test -n "$APK"
+          cp "$APK" app.apk
+`;
+  }
+  else if(d.t==='flutter')steps=J(17)+`      - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
@@ -240,27 +315,16 @@ function workflow(d){
           flutter pub get
           flutter build apk --release
 `;
-  else if(d.t==='cap')steps=NODE+J17+`      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Accept licenses
-        run: yes | sdkmanager --licenses >/dev/null || true
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Build
+  else if(d.t==='cap')steps=NODE+J(17)+`      - name: Build
         run: |
           cd "${D}"
           npm install
           npm run build --if-present
-          npx cap add android || true
+          [ -d android ] || npx cap add android
           npx cap sync android
-          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
-          cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon --stacktrace
+          cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon
 `;
-  else steps=NODE+J17+`      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Accept licenses
-        run: yes | sdkmanager --licenses >/dev/null || true
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Wrap web app
+  else steps=NODE+J(17)+`      - name: Wrap web app
         run: |
           mkdir -p /tmp/cap/www
           cp -r "${D}"/. /tmp/cap/www/
@@ -270,8 +334,7 @@ function workflow(d){
           npx cap init "Web App" com.web.app --web-dir=www
           npx cap add android
           npx cap sync android
-          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
-          cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon --stacktrace
+          cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon
 `;
   return `name: Build APK
 on:
@@ -283,25 +346,32 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-`+steps+`      - name: Collect APK
-        run: |
-          APK=$(find . /tmp/cap -path "*outputs*" -name "*.apk" 2>/dev/null | head -1)
-          echo "APK=$APK"
-          if [ -z "$APK" ]; then
-            echo "ERROR: No APK found. Listing outputs:"
-            find . -path "*outputs*" -type f 2>/dev/null | head -50
-            exit 1
-          fi
-          cp "$APK" "$GITHUB_WORKSPACE/app.apk"
-          ls -la "$GITHUB_WORKSPACE/app.apk"
-      - uses: softprops/action-gh-release@v2
+`+steps+collect+`      - uses: softprops/action-gh-release@v2
         with:
           tag_name: v\${{ github.run_number }}
           name: Build \${{ github.run_number }}
           files: app.apk
 `;
+}
+
+// تعديل gradle.properties عند غيابه (مشاكل شائعة في مشاريع AndroidX)
+async function patchGradleProps(z,names,strip,d,tree,full){
+  const P=n=>strip?n.slice(strip.length):n;
+  const gp=d.pre+'gradle.properties';
+  const n=names.find(x=>P(x)===gp);
+  let txt=n?await z.files[n].async('string'):'';
+  const add=[];
+  if(d.androidx&&!/^\s*android\.useAndroidX\s*=/m.test(txt))add.push('android.useAndroidX=true');
+  if(!/^\s*org\.gradle\.jvmargs\s*=/m.test(txt))add.push('org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8');
+  if(!add.length)return;
+  txt=(txt&&!txt.endsWith('\n')?txt+'\n':txt)+add.join('\n')+'\n';
+  const bl=await gh(`/repos/${full}/git/blobs`,{method:'POST',body:JSON.stringify({content:b64u(txt),encoding:'base64'})});
+  const e={path:gp,mode:'100644',type:'blob',sha:bl.sha},i=tree.findIndex(x=>x.path===gp);
+  if(i>=0)tree[i]=e;else tree.push(e);
+  log('تم ضبط gradle.properties: '+add.map(a=>a.split('=')[0]).join('، '));
 }
 
 async function upload(){
@@ -312,11 +382,10 @@ async function upload(){
   try{
     log('قراءة الملف...');
     const z=await JSZip.loadAsync(zipFile);
-    let names=Object.keys(z.files).filter(n=>!z.files[n].dir&&!/(^|\/)(__MACOSX|\.DS_Store)(\/|$)/.test(n)&&!n.startsWith('.git/'));
+    const names=cleanNames(z);
     if(!names.length)throw new Error('الملف فارغ');
-    // إزالة المجلد الجذري الوحيد
-    const roots=new Set(names.map(n=>n.split('/')[0]));
-    const strip=(roots.size===1&&names.every(n=>n.includes('/')))?[...roots][0]+'/':'';
+    const strip=stripOf(names);
+    const P=n=>strip?n.slice(strip.length):n;
     log(`${names.length} ملف`);
 
     let repo=target;
@@ -335,7 +404,6 @@ async function upload(){
     }
     const base=ref.object.sha;
 
-    // رفع الملفات (5 بالتوازي)
     log('رفع الملفات...');
     const tree=[];let done=0,i=0;
     async function worker(){
@@ -345,32 +413,33 @@ async function upload(){
         let blob,tries=0;
         while(true){
           try{blob=await gh(`/repos/${full}/git/blobs`,{method:'POST',body:JSON.stringify({content:b64,encoding:'base64'})});break}
-          catch(e){if(++tries>3)throw new Error(`فشل رفع ${n}: ${e.message}`);await new Promise(r=>setTimeout(r,1000*tries))}
+          catch(e){if(++tries>3)throw new Error(`فشل رفع ${n}: ${e.message}`);await sleep(1000*tries)}
         }
-        tree.push({path:strip?n.slice(strip.length):n,mode:'100644',type:'blob',sha:blob.sha});
+        tree.push({path:P(n),mode:'100644',type:'blob',sha:blob.sha});
         prog(Math.round(++done/names.length*85));
       }
     }
     await Promise.all(Array.from({length:5},worker));
 
+    const paths=names.map(P);
+    const hasWf=paths.some(x=>x.startsWith('.github/workflows/'));
+    let apkFlow=hasWf;
     if($('autoapk').checked){
-      const paths=names.map(n=>strip?n.slice(strip.length):n);
-      if(paths.some(x=>x.startsWith('.github/workflows/')))log('يوجد ملف بناء في المشروع، تُرك كما هو');
-      else{
-        const d=detect(paths);
-        if(d){
-          const yml=workflow(d);
-          const bl=await gh(`/repos/${full}/git/blobs`,{method:'POST',body:JSON.stringify({content:btoa(unescape(encodeURIComponent(yml))),encoding:'base64'})});
-          tree.push({path:'.github/workflows/build-apk.yml',mode:'100644',type:'blob',sha:bl.sha});
-          log(`نوع المشروع: ${d.label} — أُضيف ملف بناء APK`);
-        }else log('لم أتعرف على نوع المشروع، لم يُضف بناء APK');
-      }
+      const d=await analyze(z,names,strip);
+      if(d&&d.t==='android')await patchGradleProps(z,names,strip,d,tree,full);
+      if(hasWf)log('يوجد ملف بناء في المشروع، تُرك كما هو');
+      else if(d){
+        const yml=workflow(d);
+        const bl=await gh(`/repos/${full}/git/blobs`,{method:'POST',body:JSON.stringify({content:b64u(yml),encoding:'base64'})});
+        tree.push({path:'.github/workflows/build-apk.yml',mode:'100644',type:'blob',sha:bl.sha});
+        apkFlow=true;
+        log(`نوع المشروع: ${d.label} — أُضيف ملف بناء APK`);
+      }else log('لم أتعرف على نوع المشروع، لم يُضف بناء APK');
     }
 
     log('بناء الإصدار...');
     const body={tree};
-    if(!$('replace').checked&&!target.newRepo)body.base_tree=base;
-    else if(target.newRepo)body.base_tree=base,0;
+    if(target.newRepo||!$('replace').checked)body.base_tree=base;
     const t=await gh(`/repos/${full}/git/trees`,{method:'POST',body:JSON.stringify(body)});
     const msg=$('msg').value.trim()||(target.newRepo?'Initial upload':'Update')+' via Uploader';
     const c=await gh(`/repos/${full}/git/commits`,{method:'POST',body:JSON.stringify({message:msg,tree:t.sha,parents:[base]})});
@@ -384,28 +453,97 @@ async function upload(){
       catch(e){pagesOn=(e.status===409||e.status===422)}
     }
     prog(100);
-    showDone(full,branch,pagesOn,repo.private);
+    showDone(full,branch,pagesOn,repo.private,c.sha,apkFlow);
   }catch(e){
-    $('e4').textContent=''+e.message;
+    $('e4').textContent=e.message+(/workflow/i.test(e.message)?'\nفعّل صلاحية workflow في التوكن ثم أعد المحاولة':'');
   }finally{$('upBtn').disabled=false}
 }
 
-function showDone(full,branch,pagesOn,priv){
+// ===== متابعة البناء داخل التطبيق =====
+let watchId=0;
+function setB(kind,title,sub){
+  const t=$('bt');
+  t.className='tile'+(kind==='ok'?' ok':kind==='er'?' er':'');
+  t.innerHTML=kind==='ok'?ic('check'):kind==='er'?'<b>!</b>':ic('refresh',kind==='spin'?'spin':'');
+  $('bs').textContent=title;$('bd').textContent=sub||'';
+}
+async function watchBuild(full,branch,sha){
+  const my=++watchId,t0=Date.now();
+  $('bgo').classList.add('hid');$('blink').classList.add('hid');
+  setB('spin','بانتظار بدء البناء...','');
+  while(my===watchId){
+    try{
+      const r=await gh(`/repos/${full}/actions/runs?head_sha=${sha}&per_page=5`);
+      const run=(r.workflow_runs||[])[0];
+      const el=Math.round((Date.now()-t0)/1000),mm=Math.floor(el/60)+':'+String(el%60).padStart(2,'0');
+      if(run){
+        $('blink').href=run.html_url;$('blink').classList.remove('hid');
+        if(run.status==='completed'){
+          if(run.conclusion==='success'){
+            let sz='';
+            try{const rel=await gh(`/repos/${full}/releases/latest`);const a=(rel.assets||[]).find(x=>x.name==='app.apk');if(a)sz=(a.size/1048576).toFixed(1)+' MB'}catch{}
+            setB('ok','APK جاهز للتحميل',sz);
+            const s=$('apkSub');if(s)s.textContent='جاهز الآن'+(sz?' • '+sz:'');
+          }else{
+            let step='';
+            try{const j=await gh(`/repos/${full}/actions/runs/${run.id}/jobs`);const jb=(j.jobs||[])[0];
+              const st=jb&&jb.steps.find(s=>s.conclusion==='failure');if(st)step='فشلت الخطوة: '+st.name;if(jb)$('blink').href=jb.html_url}catch{}
+            setB('er','فشل البناء',step||'افتح السجل لمعرفة السبب');
+          }
+          return;
+        }
+        setB('spin',run.status==='queued'?'في قائمة الانتظار...':'جاري بناء APK...',mm);
+      }else if(el>90){
+        setB('er','لم يبدأ البناء تلقائياً','يمكنك تشغيله يدوياً');
+        $('bgo').classList.remove('hid');
+        $('bgo').onclick=async()=>{
+          try{await gh(`/repos/${full}/actions/workflows/build-apk.yml/dispatches`,{method:'POST',body:JSON.stringify({ref:branch})});await sleep(3000);watchBuild(full,branch,sha)}
+          catch(e){setB('er','تعذر التشغيل',e.message)}
+        };
+        return;
+      }
+    }catch(e){}
+    await sleep(8000);
+  }
+}
+
+function showDone(full,branch,pagesOn,priv,sha,apkFlow){
   const [o,n]=full.split('/');
   const items=[];
-  items.push(['phone','تحميل APK مباشر','يعمل بعد انتهاء البناء (نحو 5 دقائق)',`https://github.com/${full}/releases/latest/download/app.apk`,1]);
+  if(apkFlow)items.push(['phone','تحميل APK مباشر','ينتهي البناء خلال دقائق',`https://github.com/${full}/releases/latest/download/app.apk`,1]);
   items.push(['download','تحميل المشروع (ZIP)','',`https://github.com/${full}/archive/refs/heads/${branch}.zip`]);
   if(pagesOn)items.push(['globe','رابط التطبيق على الويب','',`https://${o.toLowerCase()}.github.io/${n}/`]);
   items.push(['activity','متابعة البناء','Actions',`https://github.com/${full}/actions`]);
   items.push(['repo','صفحة المشروع','',`https://github.com/${full}`]);
-  $('links').innerHTML=items.map(([i,t,sb,u,m],k)=>`<div class="lk${m?' main':''}"><div class="tile">${ic(i)}</div><div class="tx"><b>${t}</b>${sb?`<small>${sb}</small>`:''}<a class="u" target="_blank" rel="noopener" href="${u}">${u}</a></div><div class="act"><button class="ib" data-u="${u}" aria-label="نسخ">${ic('copy')}</button><a class="ib" target="_blank" rel="noopener" href="${u}" aria-label="فتح">${ic('ext')}</a></div></div>`).join('');
+  $('links').innerHTML=items.map(([i,t,sb,u,m],k)=>`<div class="lk${m?' main':''}"><div class="tile">${ic(i)}</div><div class="tx"><b>${t}</b>${sb?`<small${m?' id="apkSub"':''}>${sb}</small>`:''}<a class="u" target="_blank" rel="noopener" href="${u}">${u}</a></div><div class="act"><button class="ib" data-u="${u}" aria-label="نسخ">${ic('copy')}</button><a class="ib" target="_blank" rel="noopener" href="${u}" aria-label="فتح">${ic('ext')}</a></div></div>`).join('');
   $('links').querySelectorAll('button[data-u]').forEach(b=>b.onclick=()=>{
     try{navigator.clipboard.writeText(b.dataset.u)}catch{}
     b.innerHTML=ic('check');setTimeout(()=>b.innerHTML=ic('copy'),1500)});
   $('note').textContent=priv?'المشروع خاص: الروابط تعمل لحسابك فقط':full;
+  watchId++;
+  $('build').classList.toggle('hid',!apkFlow);
   go(5);
+  if(apkFlow)watchBuild(full,branch,sha);
 }
-$('zip').onchange=()=>{const f=$('zip').files[0];$('zname').textContent=f?f.name:'اضغط لاختيار ملف ZIP';$('drop').classList.toggle('has',!!f)};
+
+$('zip').onchange=async()=>{
+  const f=$('zip').files[0],det=$('det');
+  $('zname').textContent=f?f.name:'اضغط لاختيار ملف ZIP';$('drop').classList.toggle('has',!!f);
+  det.className='chip hid';
+  $('pagesRow').classList.remove('hid');
+  if(!f)return;
+  try{
+    const z=await JSZip.loadAsync(f),names=cleanNames(z),d=await analyze(z,names,stripOf(names));
+    if(!d){det.textContent='لم يُتعرف على نوع المشروع — لن يُبنى APK';det.className='chip warn';return}
+    let t='تم التعرف: '+d.label;
+    if(d.t==='android'){
+      if(d.agp)t+=` • AGP ${d.agp}`;
+      if(!(d.hasGradlew&&d.hasJar))t+=` • بدون Gradle wrapper، سيُستخدم Gradle ${gradleFor(d.agp,d.gradleVer)}`;
+      $('pagesRow').classList.add('hid');$('pages').checked=false;
+    }
+    det.textContent=t;det.className='chip';
+  }catch{}
+};
 go(1);
 // دخول تلقائي
 const saved=store.get('gh_token');if(saved)login(saved);
