@@ -1,0 +1,77 @@
+name: Build APK
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses >/dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Detect and Build
+        run: |
+          set -e
+          # Native Android (Gradle)
+          if [ -f settings.gradle ] || [ -f settings.gradle.kts ] || [ -f app/build.gradle ] || [ -f app/build.gradle.kts ]; then
+            echo "== Native Android project =="
+            if [ -f gradlew ]; then chmod +x gradlew; ./gradlew assembleDebug --no-daemon --stacktrace
+            else gradle assembleDebug --no-daemon --stacktrace; fi
+          # Capacitor
+          elif [ -f capacitor.config.json ] || [ -f capacitor.config.ts ]; then
+            echo "== Capacitor project =="
+            npm install
+            npm run build --if-present
+            [ -d android ] || npx cap add android
+            npx cap sync android
+            cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon --stacktrace
+          # Web fallback via Capacitor wrap
+          elif [ -f package.json ] || [ -f index.html ] || [ -f www/index.html ]; then
+            echo "== Web project — wrapping with Capacitor =="
+            mkdir -p /tmp/cap/www
+            if [ -d www ]; then cp -r www/. /tmp/cap/www/; else cp -r . /tmp/cap/www/; fi
+            cd /tmp/cap
+            npm init -y
+            npm i @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+            npx cap init "Web App" com.web.app --web-dir=www
+            npx cap add android
+            npx cap sync android
+            cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            echo "ERROR: Unknown project type"
+            ls -la
+            exit 1
+          fi
+
+      - name: Collect APK
+        run: |
+          APK=$(find . /tmp/cap -path "*outputs*" -name "*.apk" 2>/dev/null | head -1)
+          echo "APK=$APK"
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found"
+            find . -path "*outputs*" -type f 2>/dev/null | head -50
+            exit 1
+          fi
+          cp "$APK" "$GITHUB_WORKSPACE/app.apk"
+          ls -la "$GITHUB_WORKSPACE/app.apk"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: app.apk
