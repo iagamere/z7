@@ -222,6 +222,7 @@ function workflow(d){
       - name: Build
         run: |
           cd "${D}"
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
           if [ -f gradlew ]; then chmod +x gradlew; ./gradlew assembleDebug --no-daemon --stacktrace; else gradle assembleDebug --no-daemon --stacktrace; fi
 `;
   else if(d.t==='flutter')steps=J17+`      - name: Setup Android SDK
@@ -243,19 +244,22 @@ function workflow(d){
         uses: android-actions/setup-android@v3
       - name: Accept licenses
         run: yes | sdkmanager --licenses >/dev/null || true
+      - uses: gradle/actions/setup-gradle@v4
       - name: Build
         run: |
           cd "${D}"
           npm install
           npm run build --if-present
-          [ -d android ] || npx cap add android
+          npx cap add android || true
           npx cap sync android
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
           cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon --stacktrace
 `;
   else steps=NODE+J17+`      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
       - name: Accept licenses
         run: yes | sdkmanager --licenses >/dev/null || true
+      - uses: gradle/actions/setup-gradle@v4
       - name: Wrap web app
         run: |
           mkdir -p /tmp/cap/www
@@ -266,6 +270,7 @@ function workflow(d){
           npx cap init "Web App" com.web.app --web-dir=www
           npx cap add android
           npx cap sync android
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
           cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon --stacktrace
 `;
   return `name: Build APK
